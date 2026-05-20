@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lowes Scraper</title>
+  <link rel="stylesheet" href="/ui/style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="dot"></span>
+      <h1>Lowes Scraper</h1>
+    </div>
+    <div class="meta">
+      <span id="runner-pill" class="pill idle">idle</span>
+      <span id="runner-elapsed" class="muted"></span>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="dashboard">Dashboard</button>
+    <button class="tab" data-tab="runner">Runner</button>
+    <button class="tab" data-tab="queue">Queue</button>
+    <button class="tab" data-tab="data">Data</button>
+    <button class="tab" data-tab="settings">Settings</button>
+  </nav>
+
+  <!-- Phase 5.1: CF block banner. Hidden by default; rendered when any
+       worker is paused on a Cloudflare challenge. JS populates per-worker
+       rows with a "Mark Solved" button. -->
+  <div id="cf-banner" class="cf-banner" hidden>
+    <div class="cf-banner-head">
+      <strong>Cloudflare challenge — manual action required</strong>
+      <span class="muted small">open the AdsPower profile below, pass the challenge, then click Mark Solved</span>
+    </div>
+    <div id="cf-banner-rows"></div>
+  </div>
+
+  <!-- ── Dashboard ─────────────────────────────────────────── -->
+  <section id="tab-dashboard" class="tab-panel active">
+    <div class="cards">
+      <div class="card"><div class="card-label">total</div><div class="card-value" id="stat-total">—</div></div>
+      <div class="card pending"><div class="card-label">pending</div><div class="card-value" id="stat-pending">—</div></div>
+      <div class="card claimed"><div class="card-label">claimed</div><div class="card-value" id="stat-claimed">—</div></div>
+      <div class="card done"><div class="card-label">done</div><div class="card-value" id="stat-done">—</div></div>
+      <div class="card failed"><div class="card-label">failed</div><div class="card-value" id="stat-failed">—</div></div>
+      <div class="card refill"><div class="card-label">needs_refill</div><div class="card-value" id="stat-refill">—</div></div>
+    </div>
+
+    <div class="section-head">
+      <h2>Categories</h2>
+      <button class="btn ghost" id="btn-refresh-cats">Refresh</button>
+    </div>
+    <div class="table-wrap">
+      <table id="tbl-categories">
+        <thead><tr>
+          <th>Category</th><th>Total</th><th>Pending</th><th>Claimed</th>
+          <th>Done</th><th>Failed</th><th>Refill</th><th>Progress</th><th>Actions</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="muted small" style="margin-top:8px">
+      <b>Reconcile</b>: re-scan existing detail JSONs for a category and reclassify their DB status. ·
+      <b>Refresh all</b>: move all <code>done</code> jobs to <code>needs_refill</code> (use after tightening completeness rules).
+    </p>
+  </section>
+
+  <!-- ── Runner ─────────────────────────────────────────── -->
+  <section id="tab-runner" class="tab-panel">
+    <div class="runner-grid">
+      <div class="runner-form">
+        <h2>Run a task</h2>
+        <label>Action
+          <select id="action">
+            <option value="discover">discover — find all categories</option>
+            <option value="setzip">setzip — set store zip code</option>
+            <option value="list" selected>list — scrape category listing</option>
+            <option value="detail">detail — consume detail queue</option>
+            <option value="full">full — list + detail</option>
+          </select>
+        </label>
+        <label>Category URL(s) — <span class="muted small">one per line for batch run · optional for <code>detail</code> (consumes all pending jobs)</span>
+          <textarea id="url" rows="4"
+                    placeholder="https://www.lowes.com/pl/category-1&#10;https://www.lowes.com/pl/category-2&#10;...&#10;(leave empty for `detail` to scrape all pending jobs across categories)"
+          ></textarea>
+        </label>
+        <label>Pages (optional, e.g. <code>1</code>, <code>1-3</code>)
+          <input id="pages" type="text" placeholder="leave empty for all" />
+        </label>
+        <label>Workers (optional — only used by <code>detail</code> / <code>full</code>)
+          <input id="workers" type="number" min="1" step="1"
+                 placeholder="leave empty -> auto (default from config.py)" />
+          <span class="muted small" id="workers-hint"></span>
+        </label>
+        <div class="row">
+          <button class="btn primary" id="btn-start">Start</button>
+          <button class="btn danger" id="btn-stop" disabled>Stop</button>
+          <button class="btn ghost" id="btn-clear-log">Clear log</button>
+        </div>
+        <p class="muted small">
+          Multi-worker (Phase 4): scraper auto-caps to <code>min(requested, claimable_jobs, pool_size)</code>
+          — 1 item left → 1 worker, plenty of items → full pool.
+        </p>
+      </div>
+
+      <div class="runner-log">
+        <div class="log-head">
+          <h2>Live log</h2>
+          <label class="autoscroll"><input type="checkbox" id="autoscroll" checked /> auto-scroll</label>
+        </div>
+        <div id="log" class="log"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Queue ─────────────────────────────────────────── -->
+  <section id="tab-queue" class="tab-panel">
+    <div class="filters">
+      <label>Status
+        <select id="q-status">
+          <option value="">all</option>
+          <option value="pending">pending</option>
+          <option value="claimed">claimed</option>
+          <option value="done">done</option>
+          <option value="failed">failed</option>
+          <option value="needs_refill">needs_refill</option>
+        </select>
+      </label>
+      <label>Category
+        <select id="q-category"><option value="">all</option></select>
+      </label>
+      <label>Search
+        <input id="q-search" type="text" placeholder="productId or URL substring" />
+      </label>
+      <button class="btn ghost" id="btn-q-refresh">Refresh</button>
+      <span id="q-total" class="muted small"></span>
+    </div>
+    <div class="table-wrap">
+      <table id="tbl-jobs">
+        <thead><tr>
+          <th>productId</th><th>Status</th><th>Category</th>
+          <th>Attempts</th><th>Worker</th><th>Updated</th><th>Error/Missing</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── Data ─────────────────────────────────────────── -->
+  <section id="tab-data" class="tab-panel">
+    <div class="data-frame">
+      <iframe id="viewer-frame" src="/viewer.html" title="Data viewer"></iframe>
+    </div>
+  </section>
+
+  <!-- ── Settings ─────────────────────────────────────────── -->
+  <section id="tab-settings" class="tab-panel">
+    <div class="section-head">
+      <h2>Worker pool</h2>
+      <div class="row" style="gap:8px; align-items:center">
+        <span id="workers-reload-info" class="muted small"></span>
+        <button class="btn ghost" id="btn-workers-refresh">Refresh from config.py</button>
+      </div>
+    </div>
+    <p class="muted small">
+      Edit <code>PROFILES</code>, <code>PROXIES</code>, or <code>WORKER_COUNT</code> in
+      <code>config.py</code>, then click <strong>Refresh</strong> — the change is picked up
+      without restarting <code>python app.py</code>.
+    </p>
+    <div class="table-wrap">
+      <table id="tbl-workers">
+        <thead><tr>
+          <th>#</th><th>Active</th><th>Profile ID</th><th>Proxy (masked)</th><th>Status</th><th>Actions</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="section-head" style="margin-top:24px">
+      <h2>Quick proxy test</h2>
+    </div>
+    <p class="muted small">Test a raw proxy string without touching AdsPower.</p>
+    <div class="row" style="gap:8px; align-items:center; flex-wrap:wrap">
+      <input id="proxy-test-input" type="text"
+             placeholder="http://user:pass@host:port  or  host:port@user:pass  or  host:port:user:pass"
+             style="flex:1; min-width:380px; background:var(--bg-2); color:var(--fg);
+                    border:1px solid var(--border); border-radius:6px;
+                    padding:8px 10px; font:13px var(--mono);" />
+      <button class="btn primary" id="btn-proxy-test">Test</button>
+    </div>
+    <div id="proxy-test-result" class="muted small" style="margin-top:12px"></div>
+  </section>
+
+  <script src="/ui/app.js"></script>
+</body>
+</html>

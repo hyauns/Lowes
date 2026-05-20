@@ -1,0 +1,43 @@
+# ── Secrets / local configuration ───────────────────────────────────────
+# config.py holds real proxy credentials, AdsPower profile IDs, and
+# rotation API keys. Use config.example.py as the template; copy to
+# config.py locally and fill in your own values. config.py is NEVER tracked.
+config.py
+
+# ── Scraped data & state ───────────────────────────────────────────────
+# Per-run state and outputs — local-only. Each developer rebuilds these.
+data/
+*.db
+*.db-shm
+*.db-wal
+*.db.bak
+*.db.bak-*
+
+# ── Logs ───────────────────────────────────────────────────────────────
+Log.txt
+*.log
+
+# ── Python ─────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Editor / IDE / OS ──────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Claude Code local settings ────────────────────────────────────────
+# Project-level Claude settings include user-specific permission allowlists.
+.claude/

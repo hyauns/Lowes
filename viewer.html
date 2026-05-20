@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lowes Scraper - Data Audit</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:'Segoe UI',system-ui,sans-serif; background:#0f1117; color:#e4e4e7; padding:20px; }
+  h1 { text-align:center; margin-bottom:8px; color:#60a5fa; font-size:26px; }
+  .subtitle { text-align:center; color:#71717a; margin-bottom:24px; font-size:13px; }
+  .stats { display:flex; gap:12px; justify-content:center; margin-bottom:24px; flex-wrap:wrap; }
+  .stat { background:#1e1e2e; border:1px solid #2d2d3d; border-radius:10px; padding:12px 20px; text-align:center; min-width:110px; }
+  .stat .num { font-size:24px; font-weight:700; color:#60a5fa; }
+  .stat .label { font-size:11px; color:#71717a; margin-top:3px; }
+  .section { margin-bottom:32px; }
+  .section-title { font-size:18px; font-weight:600; margin-bottom:12px; padding-bottom:6px; border-bottom:1px solid #2d2d3d; }
+  .badge { font-size:11px; border-radius:20px; padding:2px 8px; margin-left:6px; vertical-align:middle; }
+  .badge.ok { background:#22c55e; color:#fff; }
+  .badge.warn { background:#f59e0b; color:#000; }
+  .badge.bad { background:#ef4444; color:#fff; }
+  .products { display:grid; gap:16px; }
+  .product-card { background:#1a1a2e; border:1px solid #2d2d3d; border-radius:12px; overflow:hidden; }
+  .product-header { display:flex; gap:14px; padding:16px; align-items:flex-start; }
+  .product-img { width:100px; height:100px; object-fit:contain; background:#111; border-radius:6px; flex-shrink:0; }
+  .product-info { flex:1; min-width:0; }
+  .product-title { font-size:14px; font-weight:600; color:#f4f4f5; margin-bottom:4px; }
+  .product-meta { font-size:11px; color:#71717a; margin-bottom:4px; }
+  .product-url { font-size:10px; color:#3b82f6; word-break:break-all; text-decoration:none; }
+  .fields { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:1px; background:#2d2d3d; }
+  .field { background:#1a1a2e; padding:10px 14px; }
+  .field-label { font-size:10px; color:#71717a; text-transform:uppercase; letter-spacing:.5px; margin-bottom:3px; }
+  .field-value { font-size:13px; color:#e4e4e7; word-break:break-word; }
+  .field-value.empty { color:#ef4444; font-style:italic; }
+  .field-value.ok { color:#22c55e; }
+  .field-value.warn { color:#f59e0b; }
+  .images-section { padding:12px 16px; border-top:1px solid #2d2d3d; }
+  .images-label { font-size:10px; color:#71717a; text-transform:uppercase; margin-bottom:6px; }
+  .images-grid { display:flex; gap:6px; overflow-x:auto; padding-bottom:6px; }
+  .images-grid img { width:70px; height:70px; object-fit:contain; background:#111; border-radius:4px; flex-shrink:0; border:1px solid #2d2d3d; }
+  .specs-section { padding:12px 16px; border-top:1px solid #2d2d3d; }
+  .specs-table { width:100%; font-size:12px; }
+  .specs-table td { padding:3px 6px; border-bottom:1px solid #1e1e2e; }
+  .specs-table td:first-child { color:#71717a; width:40%; }
+  .summary-table { width:100%; border-collapse:collapse; font-size:12px; }
+  .summary-table th { text-align:left; padding:8px 10px; background:#1e1e2e; color:#71717a; font-weight:500; text-transform:uppercase; font-size:10px; }
+  .summary-table td { padding:8px 10px; border-bottom:1px solid #2d2d3d; }
+  .check { color:#22c55e; }
+  .cross { color:#ef4444; }
+  .bullets { padding:12px 16px; border-top:1px solid #2d2d3d; }
+  .bullets ul { margin:0; padding-left:20px; }
+  .bullets li { font-size:12px; color:#a1a1aa; margin-bottom:3px; }
+  .desc-text { font-size:12px; color:#a1a1aa; padding:12px 16px; border-top:1px solid #2d2d3d; line-height:1.5; }
+  #loading { text-align:center; padding:40px; color:#71717a; font-size:16px; }
+</style>
+</head>
+<body>
+<h1>🔍 Lowes Scraper — Data Audit</h1>
+<p class="subtitle">Visualize scraped detail data quality</p>
+<div id="loading">Loading product data...</div>
+<div id="app" style="display:none">
+  <div id="stats" class="stats"></div>
+  <div class="section">
+    <h2 class="section-title">📊 Field Coverage</h2>
+    <table class="summary-table" id="summaryTable"><thead><tr>
+      <th>Field</th><th>Has Data</th><th>Empty</th><th>Quality</th>
+    </tr></thead><tbody></tbody></table>
+  </div>
+  <div class="section">
+    <h2 class="section-title" id="productsHeader">📦 Products</h2>
+    <div class="products" id="productCards"></div>
+  </div>
+</div>
+
+<script>
+async function loadAllDetails() {
+  // First load the listing to get product IDs
+  let productIds = [];
+  try {
+    const listFiles = ['power-tools'];
+    for (const f of listFiles) {
+      const r = await fetch(`./data/listings/${f}.json`);
+      const d = await r.json();
+      productIds = productIds.concat((d.products || []).map(p => p.productId).filter(Boolean));
+    }
+  } catch(e) {}
+
+  // Also try to discover detail files by loading known IDs
+  if (productIds.length === 0) {
+    // Hardcoded fallback from directory listing
+    productIds = ['1000898624','1000981054','1001009102','1003016536','5002909283','5013107409','5013121315','5013201381','5013201389','5013610507','5013817811','5014148439','5014148635','5014148639','5015177085'];
+  }
+
+  const products = [];
+  for (const id of [...new Set(productIds)]) {
+    try {
+      const r = await fetch(`./data/details/${id}.json`);
+      if (r.ok) products.push(await r.json());
+    } catch(e) {}
+  }
+  return products;
+}
+
+function render(products) {
+  document.getElementById('loading').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+
+  const total = products.length;
+
+  const fields = [
+    { key:'title', label:'Title' },
+    { key:'brand', label:'Brand' },
+    { key:'price', label:'Price' },
+    { key:'wasPrice', label:'Was Price' },
+    { key:'modelNumber', label:'Model Number' },
+    { key:'itemNumber', label:'Item Number' },
+    { key:'gtin', label:'GTIN/UPC' },
+    { key:'sku', label:'SKU' },
+    { key:'rating', label:'Rating' },
+    { key:'reviewCount', label:'Review Count' },
+    { key:'description', label:'Description' },
+    { key:'descriptionBullets', label:'Description Bullets', isArr:true },
+    { key:'featureText', label:'Feature Text', isArr:true },
+    { key:'featureImages', label:'Feature Images', isArr:true },
+    { key:'specifications', label:'Specifications', isObj:true },
+    { key:'images', label:'Product Images', isArr:true },
+  ];
+
+  // Stats
+  const counts = {};
+  for (const f of fields) {
+    counts[f.key] = products.filter(p => {
+      const v = p[f.key];
+      if (f.isArr) return v && v.length > 0;
+      if (f.isObj) return v && Object.keys(v).length > 0;
+      return v && String(v).trim().length > 0;
+    }).length;
+  }
+
+  document.getElementById('stats').innerHTML = `
+    <div class="stat"><div class="num">${total}</div><div class="label">Products</div></div>
+    <div class="stat"><div class="num">${counts.brand}/${total}</div><div class="label">Brand</div></div>
+    <div class="stat"><div class="num">${counts.price}/${total}</div><div class="label">Price</div></div>
+    <div class="stat"><div class="num">${counts.specifications}/${total}</div><div class="label">Specs</div></div>
+    <div class="stat"><div class="num">${counts.description}/${total}</div><div class="label">Description</div></div>
+    <div class="stat"><div class="num">${counts.gtin}/${total}</div><div class="label">GTIN/UPC</div></div>
+    <div class="stat"><div class="num">${counts.images}/${total}</div><div class="label">Images</div></div>
+  `;
+
+  // Summary table
+  const tbody = document.querySelector('#summaryTable tbody');
+  for (const f of fields) {
+    const has = counts[f.key];
+    const miss = total - has;
+    const q = has === total ? '✅' : has > 0 ? '⚠️' : '❌';
+    const cls = has === total ? 'ok' : has > 0 ? 'warn' : 'bad';
+    tbody.innerHTML += `<tr>
+      <td><strong>${f.label}</strong></td>
+      <td class="check">${has}</td>
+      <td class="${miss > 0 ? 'cross' : ''}">${miss}</td>
+      <td><span class="badge ${cls}">${q} ${has}/${total}</span></td>
+    </tr>`;
+  }
+
+  // Product cards
+  document.getElementById('productsHeader').innerHTML = `📦 Products <span class="badge ok">${total}</span>`;
+  const cardsEl = document.getElementById('productCards');
+
+  for (const p of products) {
+    const mainImg = p.images?.[0] || '';
+    const specKeys = p.specifications ? Object.keys(p.specifications) : [];
+
+    let card = `<div class="product-card">
+      <div class="product-header">
+        ${mainImg ? `<img class="product-img" src="${mainImg}" onerror="this.style.display='none'"/>` : ''}
+        <div class="product-info">
+          <div class="product-title">${p.title || 'NO TITLE'}</div>
+          <div class="product-meta">ID: ${p.productId} | ${p.scraped_at?.split('T')[0] || ''}</div>
+          <a class="product-url" href="${p.url}" target="_blank">${p.url}</a>
+        </div>
+      </div>
+      <div class="fields">
+        ${fieldCell('Brand', p.brand)}
+        ${fieldCell('Price', p.price, p.wasPrice ? `<s style="color:#71717a;margin-left:6px">${p.wasPrice}</s>` : '')}
+        ${fieldCell('Model #', p.modelNumber)}
+        ${fieldCell('Item #', p.itemNumber)}
+        ${fieldCell('GTIN/UPC', p.gtin)}
+        ${fieldCell('SKU', p.sku)}
+        ${fieldCell('MPN', p.mpn)}
+        ${fieldCell('Rating', p.rating, p.reviewCount ? ` (${p.reviewCount} reviews)` : '')}
+        ${fieldCell('Specs', specKeys.length ? `${specKeys.length} specs` : '', '', specKeys.length > 0)}
+        ${fieldCell('Images', `${(p.images||[]).length} images`,'', (p.images||[]).length > 0)}
+        ${fieldCell('Features', (p.featureText||[]).length ? `${p.featureText.length} items` : '', `${(p.featureImages||[]).length ? (p.featureImages.length + ' imgs') : ''}`, (p.featureText||[]).length > 0 || (p.featureImages||[]).length > 0)}
+      </div>`;
+
+    // Description
+    if (p.description) {
+      card += `<div class="desc-text"><strong style="color:#60a5fa">Overview:</strong> ${p.description.substring(0, 400)}${p.description.length > 400 ? '...' : ''}</div>`;
+    }
+
+    // Bullets
+    if (p.descriptionBullets?.length) {
+      card += `<div class="bullets"><div class="images-label">Description Bullets (${p.descriptionBullets.length})</div>
+        <ul>${p.descriptionBullets.slice(0, 6).map(b => `<li>${b}</li>`).join('')}
+        ${p.descriptionBullets.length > 6 ? `<li style="color:#71717a">...and ${p.descriptionBullets.length - 6} more</li>` : ''}
+        </ul></div>`;
+    }
+
+    // Specs
+    if (specKeys.length) {
+      card += `<div class="specs-section"><div class="images-label">Specifications (${specKeys.length})</div>
+        <table class="specs-table">
+          ${specKeys.slice(0, 15).map(k => `<tr><td>${k}</td><td>${p.specifications[k]}</td></tr>`).join('')}
+          ${specKeys.length > 15 ? `<tr><td colspan="2" style="color:#71717a">...and ${specKeys.length - 15} more</td></tr>` : ''}
+        </table></div>`;
+    }
+
+    // Images
+    if (p.images?.length) {
+      card += `<div class="images-section"><div class="images-label">Images (${p.images.length})</div>
+        <div class="images-grid">
+          ${p.images.slice(0, 10).map(u => `<img src="${u}" onerror="this.style.display='none'"/>`).join('')}
+        </div></div>`;
+    }
+
+    card += '</div>';
+    cardsEl.innerHTML += card;
+  }
+}
+
+function fieldCell(label, value, extra, forceOk) {
+  extra = extra || '';
+  const hasVal = forceOk || (value && String(value).trim());
+  return `<div class="field">
+    <div class="field-label">${label}</div>
+    <div class="field-value ${hasVal ? 'ok' : 'empty'}">${hasVal ? value + extra : '❌ Empty'}</div>
+  </div>`;
+}
+
+loadAllDetails().then(render);
+</script>
+</body>
+</html>
