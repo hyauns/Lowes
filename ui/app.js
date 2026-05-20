@@ -182,6 +182,82 @@ async function refreshWorkersHint() {
 }
 refreshWorkersHint();
 
+// ── Category picker (for detail action) ─────────────────────────────────
+// Loaded from /api/categories. A category is "queueable" when it has any
+// pending / needs_refill / claimed (stale) jobs. The Runner sends ticked
+// names as `category_names` so the worker processes them sequentially.
+const catPickerLabel = $("#cat-picker-label");
+const catPickerList = $("#cat-picker-list");
+const catPickerSummary = $("#cat-picker-summary");
+
+function updateCatPickerVisibility() {
+  const isDetail = $("#action").value === "detail";
+  catPickerLabel.style.display = isDetail ? "" : "none";
+}
+
+async function refreshCatPicker() {
+  catPickerSummary.textContent = "loading…";
+  try {
+    const r = await api("/api/categories");
+    const all = r.categories || [];
+    // Only show categories with queueable work (pending + needs_refill + claimed).
+    const queueable = all.filter((c) =>
+      (c.pending || 0) + (c.needs_refill || 0) + (c.claimed || 0) > 0
+    );
+    if (queueable.length === 0) {
+      catPickerList.innerHTML =
+        '<div class="muted small">No categories with pending jobs. Run <code>list</code> first to enqueue products.</div>';
+      catPickerSummary.textContent = "0 queueable";
+      return;
+    }
+    // Sort by total queueable items, descending — biggest backlogs first.
+    queueable.sort(
+      (a, b) =>
+        (b.pending + b.needs_refill + b.claimed) -
+        (a.pending + a.needs_refill + a.claimed)
+    );
+    catPickerList.innerHTML = queueable
+      .map((c) => {
+        const pend = c.pending || 0;
+        const refill = c.needs_refill || 0;
+        const claim = c.claimed || 0;
+        const done = c.done || 0;
+        const fail = c.failed || 0;
+        const parts = [`${pend} pending`];
+        if (refill) parts.push(`${refill} refill`);
+        if (claim) parts.push(`${claim} claimed`);
+        const counts = parts.join(", ");
+        const aside = `${done} done · ${fail} failed`;
+        return `<label class="cat-picker-row">
+          <input type="checkbox" class="cat-cb" value="${escapeHtml(c.category)}" />
+          <span class="cat-name">${escapeHtml(c.category)}</span>
+          <span class="cat-counts">${counts} <span class="muted">(${aside})</span></span>
+        </label>`;
+      })
+      .join("");
+    catPickerSummary.textContent = `${queueable.length} queueable categor${queueable.length === 1 ? "y" : "ies"}`;
+  } catch (e) {
+    catPickerList.innerHTML = `<div class="muted small">Failed to load: ${escapeHtml(String(e.message))}</div>`;
+    catPickerSummary.textContent = "load failed";
+  }
+}
+
+$("#action").addEventListener("change", updateCatPickerVisibility);
+$("#btn-cat-all").addEventListener("click", (e) => {
+  e.preventDefault();
+  catPickerList.querySelectorAll(".cat-cb").forEach((cb) => (cb.checked = true));
+});
+$("#btn-cat-none").addEventListener("click", (e) => {
+  e.preventDefault();
+  catPickerList.querySelectorAll(".cat-cb").forEach((cb) => (cb.checked = false));
+});
+$("#btn-cat-refresh").addEventListener("click", (e) => {
+  e.preventDefault();
+  refreshCatPicker();
+});
+updateCatPickerVisibility();
+refreshCatPicker();
+
 $("#btn-start").addEventListener("click", async () => {
   const action = $("#action").value;
   // Multi-URL batch: textarea splits by newline. Each non-empty line is one
@@ -195,10 +271,16 @@ $("#btn-start").addEventListener("click", async () => {
   const pages = $("#pages").value.trim();
   const workers = $("#workers").value.trim();
   const body = { action };
+  // Collect ticked categories from the picker — only meaningful for detail.
+  const pickedCats = Array.from(
+    catPickerList.querySelectorAll(".cat-cb:checked")
+  ).map((cb) => cb.value);
+
   if (["list", "detail", "full"].includes(action)) {
     // URL is REQUIRED for list/full (the scraper needs a starting point)
     // but OPTIONAL for detail (queue already knows what to scrape — leaving
-    // the field empty consumes pending jobs across ALL categories).
+    // the field empty consumes pending jobs across ALL categories, OR pick
+    // specific ones from the category dropdown).
     if (urls.length === 0 && action !== "detail") {
       alert("Category URL is required for list/full");
       return;
@@ -211,6 +293,9 @@ $("#btn-start").addEventListener("click", async () => {
       }
       if (urls.length === 1) body.url = urls[0];
       else body.urls = urls;
+    }
+    if (action === "detail" && pickedCats.length > 0) {
+      body.category_names = pickedCats;
     }
   }
   if (["list", "full"].includes(action) && pages) body.pages = pages;

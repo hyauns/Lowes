@@ -285,6 +285,55 @@ class Runner:
                 (requested_workers and requested_workers > 0) or cfg.WORKER_COUNT > 1
             )
 
+            # Batch-by-category-name (2026-05-20): UI dropdown sends
+            # `category_names` for detail action. The dispatcher loops over
+            # them sequentially, passing the name (not URL) to the handler.
+            # This bypasses the URL field entirely — useful when the user
+            # has many categories queued up and wants to pick which ones to
+            # process without re-pasting URLs.
+            cat_names = params.pop("category_names", None)
+            if cat_names and action == "detail":
+                broadcaster.push(
+                    f"[Multi-Cat] batch run: {len(cat_names)} categories from queue, "
+                    f"will process sequentially",
+                    "info",
+                )
+                for idx, one_cat in enumerate(cat_names, start=1):
+                    if self.stop_event.is_set():
+                        broadcaster.push(
+                            f"[Multi-Cat] Stop requested — aborting after "
+                            f"{idx - 1}/{len(cat_names)} categories",
+                            "warn",
+                        )
+                        break
+                    broadcaster.push(
+                        f"=== [Multi-Cat {idx}/{len(cat_names)}] '{one_cat}' ===",
+                        "info",
+                    )
+                    per_params = {k: v for k, v in params.items() if k != "url"}
+                    per_params["category_name"] = one_cat
+                    try:
+                        if use_multi:
+                            await self._run_multi(action, per_params)
+                        else:
+                            await self._run_single(action, per_params)
+                    except Exception as inner_e:
+                        broadcaster.push(
+                            f"!!! [Multi-Cat {idx}/{len(cat_names)}] '{one_cat}': "
+                            f"{type(inner_e).__name__}: {inner_e}",
+                            "error",
+                        )
+                        import traceback
+                        broadcaster.push(traceback.format_exc(), "error")
+                else:
+                    broadcaster.push(
+                        f"[Multi-Cat] all {len(cat_names)} categories processed",
+                        "info",
+                    )
+                # Skip the urls / single-path branches below.
+                broadcaster.push(f"=== [{action}] finished ===", "info")
+                return
+
             # Batch-URL support (2026-05-18): /api/runner/start can pass a
             # `urls` list. The dispatcher loops over them in order, calling
             # the SAME single/multi handler per URL with `params["url"]`
@@ -480,8 +529,13 @@ class Runner:
                 )
             elif action == "detail":
                 # URL is optional for detail (2026-05-20): when omitted, the
-                # queue is consumed across ALL categories.
-                await scraper.scrape_details_for_category(params.get("url"))
+                # queue is consumed across ALL categories. `category_name`
+                # (also optional) lets the UI dropdown pick from queued
+                # categories without supplying a URL.
+                await scraper.scrape_details_for_category(
+                    params.get("url"),
+                    category_name=params.get("category_name"),
+                )
             elif action == "full":
                 await scraper.set_zip()
                 await scraper.scrape_listing(
@@ -506,7 +560,9 @@ class Runner:
         if action == "full" and not url:
             broadcaster.push("`full` action requires a category URL", "error")
             return
-        category_name = _name_from_url(url) if url else None
+        # `category_name` may come from the UI dropdown (no URL) or be
+        # derived from `url` when one was supplied.
+        category_name = params.get("category_name") or (_name_from_url(url) if url else None)
 
         # --- step 1: optional zip + listing (one-shot, worker 0 only) ---
         if action == "full":
@@ -890,6 +946,23 @@ async def api_runner_start(payload: dict):
             params["urls"] = urls
             if len(urls) == 1:
                 params["url"] = urls[0]
+
+        # category_names (2026-05-20): UI dropdown lets the user pick from
+        # categories that already have queued jobs. detail-only — list/full
+        # need actual URLs because they have to navigate to the page.
+        cat_names_raw = payload.get("category_names")
+        if cat_names_raw is not None:
+            if action != "detail":
+                raise HTTPException(
+                    400,
+                    "category_names only valid for action='detail' "
+                    "(list/full need URLs, not just names)",
+                )
+            if not isinstance(cat_names_raw, list):
+                raise HTTPException(400, "`category_names` must be a list of strings")
+            cat_names = [str(n).strip() for n in cat_names_raw if str(n).strip()]
+            if cat_names:
+                params["category_names"] = cat_names
     if action in ("list", "full"):
         # Accept page_from / page_to either as ints or via 'pages' string '1-3'
         if "pages" in payload and payload["pages"]:

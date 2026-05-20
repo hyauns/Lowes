@@ -1962,7 +1962,7 @@ class LowesScraper:
                     return result
         return None
 
-    async def scrape_details_for_category(self, category_url=None):
+    async def scrape_details_for_category(self, category_url=None, category_name=None):
         """Scrape product details for a category, or for ALL pending jobs.
 
         Two modes:
@@ -1970,19 +1970,23 @@ class LowesScraper:
             graceful Ctrl+C release. Cross-worker safe.
           • Without state manager (legacy): iterate listing JSON directly.
 
-        category_url may be None (2026-05-20): the Runner allows a URL-less
-        `detail` action since the queue already knows which products need
-        scraping. In that case we skip the category-scoped warmup (no
-        category page to visit as Referer source) and let `claim_next` pull
-        from any category. Legacy (no-state) mode still requires a URL.
+        Args:
+            category_url:  full category URL (derives name + enables warmup).
+            category_name: category name only (when the UI picked from the
+                queue dropdown — no URL available). Skips warmup since we
+                don't know which category page to use as Referer source.
+                Both None → consume queue across ALL categories.
+
+        Legacy (no-state) mode still requires a URL because it reads the
+        on-disk listing JSON.
         """
-        category_name = _name_from_url(category_url) if category_url else None
+        if category_url and not category_name:
+            category_name = _name_from_url(category_url)
 
         # Phase 5a: warm up the session BEFORE hitting any /pd/ link, unless
         # we're already warmed (e.g. caller ran scrape_listing first which
         # built equivalent state). Cheap idempotency guard via _warmed_up.
-        # If no category_url given, skip the full warmup — workers can still
-        # operate cold, just with no category-page Referer.
+        # Warmup requires a category URL — name-only mode skips it.
         if not self._warmed_up and category_url:
             await self.warmup(category_url)
 
@@ -1992,7 +1996,7 @@ class LowesScraper:
             if not category_url:
                 raise ValueError(
                     "legacy (no-state) mode requires category_url — "
-                    "URL-less detail only works with the SQLite queue"
+                    "URL-less / name-only detail only works with the SQLite queue"
                 )
             await self._scrape_details_legacy(category_name, category_url)
 
