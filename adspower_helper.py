@@ -274,7 +274,24 @@ class AdsPower:
         self.pid = profile_id
 
     def start(self):
-        """Start browser profile, return puppeteer WS endpoint."""
+        """Start browser profile, return puppeteer WS endpoint.
+
+        Idempotent (2026-05-20): if the profile is already running
+        (typical on VPS where the user opened it manually before invoking
+        the scraper), return the existing WS instead of re-issuing
+        /browser/start. This preserves the manual session and avoids
+        the stale-ws problem observed when AdsPower's start endpoint is
+        called against an already-active profile.
+        """
+        active = self._get_active_info()
+        if active and active.get("ws"):
+            ws = active["ws"]
+            print(
+                f"[AdsPower] profile={self.pid} ALREADY ACTIVE — reusing WS: "
+                f"{ws[:60]}..."
+            )
+            return ws
+
         try:
             j = _request(
                 "GET",
@@ -308,13 +325,24 @@ class AdsPower:
         except Exception as e:
             print(f"[AdsPower] Stop {self.pid} error (non-fatal): {e}")
 
-    def is_active(self):
+    def _get_active_info(self):
+        """Return {'status': 'Active', 'ws': '...'} if profile is currently
+        running, else None. Used by start() to detect manually-opened
+        profiles. Never raises; failure to reach the API is treated as
+        "not active" so the caller falls through to /browser/start."""
         try:
             j = _request(
                 "GET",
                 f"{self.api}/api/v1/browser/active?user_id={self.pid}",
                 timeout=QUICK_TIMEOUT,
             )
-            return j.get("data", {}).get("status") == "Active"
         except Exception:
-            return False
+            return None
+        data = j.get("data") or {}
+        if data.get("status") != "Active":
+            return None
+        ws = (data.get("ws") or {}).get("puppeteer") or ""
+        return {"status": "Active", "ws": ws}
+
+    def is_active(self):
+        return self._get_active_info() is not None

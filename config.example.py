@@ -55,6 +55,16 @@ PROXY_ROTATION_MAX_WAIT = 120
 # up to PROXY_ALIVE_WAIT_MAX_ATTEMPTS times.
 PROXY_ALIVE_WAIT_INTERVAL = 60
 PROXY_ALIVE_WAIT_MAX_ATTEMPTS = 30  # 30 × 60s = 30 minutes absolute cap
+
+# ─── CDP connect retry (for VPS / slow hosts) ────────────────────────────
+# Worker.connect() spins up an AdsPower profile and then connects to its
+# Chrome via CDP. On VPS hosts the proxy-bound Chrome can take minutes to
+# settle, so we use a short per-attempt timeout and retry instead of
+# waiting one long timeout and then giving up. Total wall-clock budget is
+# roughly CDP_CONNECT_MAX_ATTEMPTS × (CDP_CONNECT_TIMEOUT_MS/1000 + RETRY_DELAY).
+CDP_CONNECT_MAX_ATTEMPTS = 40              # ≈ 30 minutes worst-case at defaults
+CDP_CONNECT_RETRY_DELAY_SECONDS = 15
+CDP_CONNECT_TIMEOUT_MS = 30000             # per-attempt timeout, NOT the total budget
 # Legacy aliases — kept to satisfy any old imports. Not actively used now.
 PROXY_ROTATION_POLL_TIMEOUT = PROXY_ALIVE_WAIT_INTERVAL * PROXY_ALIVE_WAIT_MAX_ATTEMPTS
 PROXY_ROTATION_POLL_INTERVAL = PROXY_ALIVE_WAIT_INTERVAL

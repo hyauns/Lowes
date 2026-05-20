@@ -203,12 +203,67 @@ class LowesScraper:
     async def connect(self):
         # ads.start() is a blocking HTTP call — run in a thread so we don't
         # stall the event loop (which would freeze the FastAPI server).
-        ws = await asyncio.to_thread(self.ads.start)
+        #
+        # CDP-connect retry loop (2026-05-20): on slow / VPS hosts, the
+        # first connect_over_cdp can hang for minutes because the proxy-
+        # bound Chrome process takes a while to spin up devtools target
+        # listing. Original code used Playwright's default 180s timeout
+        # and gave up on first failure → whole worker pool died if even
+        # one profile was slow. New behaviour: short per-attempt timeout,
+        # bounded retry, idempotent ads.start so a manually-opened
+        # profile keeps its session. Knobs (config.py):
+        #   • CDP_CONNECT_MAX_ATTEMPTS    (default 40)
+        #   • CDP_CONNECT_RETRY_DELAY_SECONDS (default 15)
+        #   • CDP_CONNECT_TIMEOUT_MS      (default 30000)
+        try:
+            import config as _cfg
+            max_attempts = int(getattr(_cfg, "CDP_CONNECT_MAX_ATTEMPTS", 40))
+            retry_delay = int(getattr(_cfg, "CDP_CONNECT_RETRY_DELAY_SECONDS", 15))
+            per_attempt_ms = int(getattr(_cfg, "CDP_CONNECT_TIMEOUT_MS", 30000))
+        except Exception:
+            max_attempts, retry_delay, per_attempt_ms = 40, 15, 30000
+
         self.pw = await async_playwright().start()
-        self.browser = await self.pw.chromium.connect_over_cdp(ws)
+        last_err = None
+        for attempt in range(1, max_attempts + 1):
+            if self._ui_stop is not None and self._ui_stop.is_set():
+                raise RuntimeError(
+                    f"[{self.worker_id}] connect aborted by stop request"
+                )
+            try:
+                ws = await asyncio.to_thread(self.ads.start)
+                print(
+                    f"[{self.worker_id}] [Connect] attempt {attempt}/{max_attempts}: "
+                    f"CDP connect (timeout {per_attempt_ms / 1000:.0f}s)..."
+                )
+                self.browser = await self.pw.chromium.connect_over_cdp(
+                    ws, timeout=per_attempt_ms
+                )
+                break
+            except Exception as e:
+                last_err = e
+                msg = f"{type(e).__name__}: {str(e)[:240]}"
+                if attempt < max_attempts:
+                    print(
+                        f"[{self.worker_id}] [Connect] attempt {attempt} FAILED: "
+                        f"{msg}. Retrying in {retry_delay}s..."
+                    )
+                    # Sleep in 1s slices so a stop request is honoured promptly.
+                    for _ in range(retry_delay):
+                        if self._ui_stop is not None and self._ui_stop.is_set():
+                            raise RuntimeError(
+                                f"[{self.worker_id}] connect aborted by stop request"
+                            )
+                        await asyncio.sleep(1)
+                else:
+                    raise RuntimeError(
+                        f"[{self.worker_id}] AdsPower CDP connect failed after "
+                        f"{max_attempts} attempts. Last error: {msg}"
+                    ) from last_err
+
         ctx = self.browser.contexts[0]
         self.page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-        print("[Scraper] Connected to AdsPower browser")
+        print(f"[{self.worker_id}] [Scraper] Connected to AdsPower browser")
 
     async def close(self):
         if self.pw:
