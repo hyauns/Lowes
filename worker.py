@@ -23,13 +23,15 @@ import time
 from typing import Optional
 
 from block_detector import detect_block
+import config as _cfg
 from completeness import check_completeness
-from config import (
-    DETAILS_DIR,
-    ITEM_TIMEOUT_SECONDS,
-    MAX_CONSECUTIVE_CRASHES_PER_PID,
-    MAX_REFILL_ATTEMPTS,
-)
+from config import DETAILS_DIR, MAX_REFILL_ATTEMPTS
+
+# Soft-import the Phase 5.7 tunables so existing config.py files without
+# these keys keep working (avoids ImportError on VPS that hasn't been
+# updated yet). Defaults match config.example.py.
+ITEM_TIMEOUT_SECONDS = getattr(_cfg, "ITEM_TIMEOUT_SECONDS", 240)
+MAX_CONSECUTIVE_CRASHES_PER_PID = getattr(_cfg, "MAX_CONSECUTIVE_CRASHES_PER_PID", 3)
 from scraper import (
     BrowserClosedError,
     LowesScraper,
