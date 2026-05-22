@@ -227,6 +227,9 @@ class LowesScraper:
         # PROXY_DEAD_THRESHOLD, _goto raises ProxyDeadError so Worker can
         # trigger switch_to_local_network recovery.
         self._proxy_error_count = 0
+        # Set True by page.on("crash") so workers can poll for crash even when
+        # the current Playwright operation hasn't raised yet.
+        self._page_crashed = False
 
     async def connect(self):
         # ads.start() is a blocking HTTP call — run in a thread so we don't
@@ -302,7 +305,46 @@ class LowesScraper:
         except Exception:
             chosen = None
         self.page = chosen or await ctx.new_page()
+        self._install_page_safety_handlers(self.page)
         print(f"[{self.worker_id}] [Scraper] Connected to AdsPower browser")
+
+    def _install_page_safety_handlers(self, page) -> None:
+        """Wire renderer-crash + JS-dialog listeners on a page.
+
+        Why this exists:
+          • page.on("crash") gives us a proactive log when Chrome's renderer
+            for this tab dies. Without it, we only learn via the next
+            Playwright op (which may hang silently if it has no timeout).
+          • page.on("dialog") auto-dismisses any alert/confirm/prompt that
+            Lowes might pop up. Playwright's default behavior is to wait
+            for a handler — without one, every subsequent op hangs forever,
+            which matches the "browser open but worker stuck" symptom on
+            VPS.
+        Idempotent-ish: handlers reference `self`, so reattaching after
+        recover_page is fine; old page is closed so its listeners die with it.
+        """
+        wid = self.worker_id
+
+        def _on_crash(_p):
+            try:
+                self._page_crashed = True
+                print(f"  [{wid}] [Scraper] page.on('crash') fired — renderer died")
+            except Exception:
+                pass
+
+        async def _on_dialog(d):
+            try:
+                msg = (d.message or "")[:200]
+                print(f"  [{wid}] [Scraper] auto-dismiss dialog ({d.type}): {msg}")
+                await d.dismiss()
+            except Exception:
+                pass
+
+        try:
+            page.on("crash", _on_crash)
+            page.on("dialog", lambda d: asyncio.create_task(_on_dialog(d)))
+        except Exception as e:
+            print(f"  [{wid}] [Scraper] could not install page handlers: {e}")
 
     async def close(self):
         if self.pw:
@@ -334,9 +376,12 @@ class LowesScraper:
         except Exception:
             return False
 
+        # Wrap close + new_page in wait_for so a wedged Chrome can't hang
+        # recovery indefinitely. 10s each is generous; if it blows past that,
+        # caller escalates to a full browser reconnect.
         try:
             if self.page and not self.page.is_closed():
-                await self.page.close()
+                await asyncio.wait_for(self.page.close(), timeout=10)
         except Exception:
             pass  # dead page may not even close cleanly
 
@@ -351,7 +396,7 @@ class LowesScraper:
 
         if candidate is None:
             try:
-                candidate = await ctx.new_page()
+                candidate = await asyncio.wait_for(ctx.new_page(), timeout=10)
             except Exception as e:
                 print(
                     f"  [{self.worker_id}] [Scraper] recover_page: "
@@ -362,6 +407,8 @@ class LowesScraper:
         self.page = candidate
         self._warmed_up = False
         self._proxy_error_count = 0
+        self._page_crashed = False
+        self._install_page_safety_handlers(self.page)
         print(f"  [{self.worker_id}] [Scraper] page replaced after crash")
         return True
 

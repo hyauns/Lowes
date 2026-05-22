@@ -24,7 +24,12 @@ from typing import Optional
 
 from block_detector import detect_block
 from completeness import check_completeness
-from config import DETAILS_DIR, MAX_REFILL_ATTEMPTS
+from config import (
+    DETAILS_DIR,
+    ITEM_TIMEOUT_SECONDS,
+    MAX_CONSECUTIVE_CRASHES_PER_PID,
+    MAX_REFILL_ATTEMPTS,
+)
 from scraper import (
     BrowserClosedError,
     LowesScraper,
@@ -103,6 +108,13 @@ class Worker:
         # Page-crash recovery (renderer died but browser still alive)
         self.page_crashes = 0
         self.page_crash_recoveries = 0
+        # Track consecutive crashes on the SAME pid so a poison page (one
+        # that crashes every worker) gets escalated to failed instead of
+        # bouncing forever between release → claim → crash → release.
+        self._last_crash_pid: Optional[str] = None
+        self._same_pid_crash_count: int = 0
+        # Per-item watchdog: how many times we hit ITEM_TIMEOUT_SECONDS.
+        self.item_timeouts = 0
 
         # Phase 5.1 — Cloudflare manual-solve pause state.
         # When CF is detected, worker enters status='blocked_cf', sets
@@ -161,7 +173,25 @@ class Worker:
                 self.item_started_at = time.time()
                 self.status = "scraping"
 
-                await self._process_job(job)
+                # Per-item watchdog. Without this, any Playwright op that
+                # hangs silently (renderer crashed but no error raised, JS
+                # dialog blocking, network stall) leaves the worker stuck
+                # forever on one product — the "browser open but worker idle"
+                # symptom on VPS. asyncio.wait_for cancels the inner task and
+                # raises TimeoutError, which we handle as a page-crash-class
+                # recovery (release pid + replace page).
+                try:
+                    await asyncio.wait_for(
+                        self._process_job(job),
+                        timeout=ITEM_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    self.item_timeouts += 1
+                    await self._handle_page_crash(
+                        self.current_pid or job["product_id"],
+                        f"item watchdog timed out after {ITEM_TIMEOUT_SECONDS}s",
+                    )
+
                 self.current_pid = None
                 self.item_started_at = None
 
@@ -347,17 +377,50 @@ class Worker:
     # ── page-crash recovery (renderer died, browser still alive) ─────────
 
     async def _handle_page_crash(self, pid: str, err: str) -> None:
-        """Replace the dead tab and release the in-flight pid so it can be
-        reclaimed (by us or a sibling) on the next loop tick. If the cheap
-        page-replace fails, escalate to a full reconnect.
+        """Replace the dead tab and decide whether to retry the pid or fail it.
+
+        Normal path: release pid → recover_page → next claim_next retries it.
+
+        Same-pid loop guard: if THIS pid has already crashed
+        MAX_CONSECUTIVE_CRASHES_PER_PID times in a row on this worker,
+        mark_failed instead of release so we don't bounce on a poison
+        product (one that crashes every renderer). User can re-arm via
+        UI "Retry Failed".
+
+        If the cheap page-replace fails, escalate to a full browser reconnect.
         """
         print(f"  [{self.worker_id}] PAGE CRASHED on {pid}: {err}")
         self.last_error = f"page_crashed: {err[:160]}"
         self.page_crashes += 1
-        try:
-            self.state.release(pid)
-        except Exception:
-            pass
+
+        # Track consecutive crashes on the same product
+        if self._last_crash_pid == pid:
+            self._same_pid_crash_count += 1
+        else:
+            self._last_crash_pid = pid
+            self._same_pid_crash_count = 1
+
+        if self._same_pid_crash_count >= MAX_CONSECUTIVE_CRASHES_PER_PID:
+            try:
+                self.state.mark_failed(
+                    pid,
+                    f"page crashed {self._same_pid_crash_count} times in a row: {err[:200]}",
+                )
+            except Exception:
+                pass
+            self.errors += 1
+            self._same_pid_crash_count = 0
+            self._last_crash_pid = None
+            print(
+                f"  [{self.worker_id}] [page-crash] {pid} crashed too many "
+                f"times — marked failed"
+            )
+        else:
+            try:
+                self.state.release(pid)
+            except Exception:
+                pass
+
         self.status = "recovering"
         ok = False
         if self.scraper is not None:
@@ -670,5 +733,6 @@ class Worker:
             "proxy_dead_failures": self.proxy_dead_failures,
             "page_crashes": self.page_crashes,
             "page_crash_recoveries": self.page_crash_recoveries,
+            "item_timeouts": self.item_timeouts,
             "last_error": self.last_error,
         }

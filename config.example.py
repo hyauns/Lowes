@@ -99,6 +99,17 @@ MAX_DELAY = 8
 CATEGORY_DELAY = 15
 TIMEOUT = 60000  # ms
 
+# Hard upper bound on a single detail scrape (goto + accordions + evaluates +
+# delays). If a worker hangs longer than this on one item — e.g. silent renderer
+# crash, JS dialog blocking Playwright, network stall with no exception —
+# the worker breaks out, releases the item, and recovers the page. Without
+# this cap, a hung worker looks like "browser open on the product page but
+# nothing happening" (the symptom seen on VPS).
+ITEM_TIMEOUT_SECONDS = 240
+# After this many crashes on the *same* product, give up and mark_failed so
+# we don't infinite-loop on a poison page that crashes every worker.
+MAX_CONSECUTIVE_CRASHES_PER_PID = 3
+
 # ─── Directories ─────────────────────────────────────────────────────────
 DATA_DIR = "data"
 LISTINGS_DIR = "data/listings"
