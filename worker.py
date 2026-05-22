@@ -28,7 +28,10 @@ from config import DETAILS_DIR, MAX_REFILL_ATTEMPTS
 from scraper import (
     BrowserClosedError,
     LowesScraper,
+    PageCrashedError,
     ProxyDeadError,
+    _is_browser_closed_error,
+    _is_page_crashed_error,
     _load_json,
     load_detail,
 )
@@ -97,6 +100,9 @@ class Worker:
         # Phase 5.3 — proxy-death recovery stats
         self.proxy_dead_recoveries = 0       # successful switch_to_local
         self.proxy_dead_failures = 0          # switch_to_local failed
+        # Page-crash recovery (renderer died but browser still alive)
+        self.page_crashes = 0
+        self.page_crash_recoveries = 0
 
         # Phase 5.1 — Cloudflare manual-solve pause state.
         # When CF is detected, worker enters status='blocked_cf', sets
@@ -273,6 +279,11 @@ class Worker:
             except Exception:
                 pass
             raise
+        except PageCrashedError as e:
+            # The Chrome renderer for our tab died. Cheap recovery — replace
+            # the page in the same context (no AdsPower restart) and let the
+            # released pid be reclaimed on the next loop tick.
+            await self._handle_page_crash(pid, str(e))
         except BrowserClosedError as e:
             # Phase 5.3 hotfix: the underlying AdsPower browser is gone
             # (CDP dropped, profile stopped, recovery closed it). Reconnect
@@ -304,6 +315,27 @@ class Worker:
                 self.status = "error"
                 raise
         except Exception as e:
+            # Late promotion: scrape_detail has many raw page.evaluate() /
+            # locator calls that aren't wrapped in our typed errors. If one
+            # of them raised 'Target crashed' / 'Page crashed' / browser-
+            # closed, treat it like the typed version instead of mark_failed
+            # (which would burn through the whole queue marking everything
+            # failed and starve sibling workers — the "3 → 1 workers" bug).
+            if _is_page_crashed_error(e):
+                await self._handle_page_crash(pid, str(e))
+                return
+            if _is_browser_closed_error(e):
+                print(f"  [{self.worker_id}] BROWSER CLOSED on {pid} (late): {e}")
+                self.last_error = f"browser_closed: {str(e)[:160]}"
+                try:
+                    self.state.release(pid)
+                except Exception:
+                    pass
+                ok = await self._reconnect_after_browser_closed()
+                if not ok:
+                    self.status = "error"
+                    raise
+                return
             print(f"  [{self.worker_id}] error {pid}: {e}")
             try:
                 self.state.mark_failed(pid, str(e))
@@ -311,6 +343,40 @@ class Worker:
                 pass
             self.errors += 1
             self.last_error = str(e)[:200]
+
+    # ── page-crash recovery (renderer died, browser still alive) ─────────
+
+    async def _handle_page_crash(self, pid: str, err: str) -> None:
+        """Replace the dead tab and release the in-flight pid so it can be
+        reclaimed (by us or a sibling) on the next loop tick. If the cheap
+        page-replace fails, escalate to a full reconnect.
+        """
+        print(f"  [{self.worker_id}] PAGE CRASHED on {pid}: {err}")
+        self.last_error = f"page_crashed: {err[:160]}"
+        self.page_crashes += 1
+        try:
+            self.state.release(pid)
+        except Exception:
+            pass
+        self.status = "recovering"
+        ok = False
+        if self.scraper is not None:
+            try:
+                ok = await self.scraper.recover_page()
+            except Exception as e:
+                print(f"  [{self.worker_id}] [page-crash] recover_page raised: {e}")
+                ok = False
+        if not ok:
+            print(
+                f"  [{self.worker_id}] [page-crash] page-replace failed "
+                f"— escalating to full browser reconnect"
+            )
+            ok = await self._reconnect_after_browser_closed()
+            if not ok:
+                self.status = "error"
+                raise WorkerError(f"{self.worker_id}: page-crash recovery failed")
+        self.page_crash_recoveries += 1
+        self.status = "idle"
 
     # ── Cloudflare pause (Phase 5.1) ─────────────────────────────────────
 
@@ -602,5 +668,7 @@ class Worker:
             "using_local": self.using_local,
             "proxy_dead_recoveries": self.proxy_dead_recoveries,
             "proxy_dead_failures": self.proxy_dead_failures,
+            "page_crashes": self.page_crashes,
+            "page_crash_recoveries": self.page_crash_recoveries,
             "last_error": self.last_error,
         }

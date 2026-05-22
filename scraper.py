@@ -140,6 +140,21 @@ class BrowserClosedError(RuntimeError):
     """
 
 
+class PageCrashedError(RuntimeError):
+    """Raised when a page operation hits 'Target crashed' / 'Page crashed'.
+
+    The Chrome renderer for this tab died but the browser context is still
+    alive. Recovery is cheap: close the dead page and open a new one in the
+    same context — no AdsPower restart, no CDP reconnect.
+
+    Without this, the error fell through the generic Exception handler in
+    worker._process_job; the worker marked the item failed and immediately
+    tried the next one, which crashed the same way — burning through the
+    whole queue in seconds and leaving other workers with nothing to claim
+    (the "3 workers shrink to 1" symptom).
+    """
+
+
 # Chrome network error codes that mean "the proxy itself didn't respond /
 # refused / dropped the connection" — distinct from server-side block pages.
 _PROXY_ERROR_PATTERNS = (
@@ -161,6 +176,14 @@ _BROWSER_CLOSED_PATTERNS = (
     "websocket.send while connection is",
 )
 
+# Substrings that mean the renderer (tab) crashed but the browser is still up.
+# Order: check page-crash BEFORE browser-closed so we pick the cheap recovery.
+_PAGE_CRASHED_PATTERNS = (
+    "Target crashed",
+    "Page crashed",
+    "Page.evaluate: Target crashed",
+)
+
 # After this many consecutive proxy errors in a row, treat the proxy as dead.
 # Single ERR_CONNECTION_CLOSED can be a transient blip; two in a row on
 # different URLs is a strong signal the proxy has actually died.
@@ -175,6 +198,11 @@ def _is_proxy_error(exc) -> bool:
 def _is_browser_closed_error(exc) -> bool:
     s = str(exc)
     return any(p in s for p in _BROWSER_CLOSED_PATTERNS)
+
+
+def _is_page_crashed_error(exc) -> bool:
+    s = str(exc)
+    return any(p in s for p in _PAGE_CRASHED_PATTERNS)
 
 
 # ─── Scraper ────────────────────────────────────────────────────────────────
@@ -262,13 +290,80 @@ class LowesScraper:
                     ) from last_err
 
         ctx = self.browser.contexts[0]
-        self.page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        # Prefer the newest non-closed page (avoids latching onto a tab that
+        # crashed before we reconnected — e.g. _reconnect_after_browser_closed
+        # after a renderer crash). Falls back to a fresh page if none usable.
+        chosen = None
+        try:
+            for p in reversed(ctx.pages):
+                if not p.is_closed():
+                    chosen = p
+                    break
+        except Exception:
+            chosen = None
+        self.page = chosen or await ctx.new_page()
         print(f"[{self.worker_id}] [Scraper] Connected to AdsPower browser")
 
     async def close(self):
         if self.pw:
             await self.pw.stop()
         print("[Scraper] Disconnected")
+
+    async def recover_page(self) -> bool:
+        """Replace the current page after a 'Target/Page crashed' error.
+
+        Cheap recovery — doesn't touch AdsPower, doesn't reconnect CDP.
+        The browser context is still alive; only the renderer for this tab
+        died. Steps:
+          1. Best-effort close the dead page (so AdsPower doesn't accumulate
+             zombie tabs visible to the user).
+          2. Prefer a non-closed page already in the context (covers the case
+             where the user pressed F5 / Ctrl+T in the AdsPower window
+             manually — the new tab is picked up automatically).
+          3. Otherwise open a fresh page in the same context.
+          4. Reset warmup state — next /pd/ visit will warm up again.
+
+        Returns True if we ended up with a usable page, False if the browser
+        context itself is also gone (caller should escalate to a full
+        reconnect).
+        """
+        try:
+            if not self.browser or not self.browser.contexts:
+                return False
+            ctx = self.browser.contexts[0]
+        except Exception:
+            return False
+
+        try:
+            if self.page and not self.page.is_closed():
+                await self.page.close()
+        except Exception:
+            pass  # dead page may not even close cleanly
+
+        candidate = None
+        try:
+            for p in reversed(ctx.pages):
+                if not p.is_closed():
+                    candidate = p
+                    break
+        except Exception:
+            candidate = None
+
+        if candidate is None:
+            try:
+                candidate = await ctx.new_page()
+            except Exception as e:
+                print(
+                    f"  [{self.worker_id}] [Scraper] recover_page: "
+                    f"new_page() failed: {e}"
+                )
+                return False
+
+        self.page = candidate
+        self._warmed_up = False
+        self._proxy_error_count = 0
+        print(f"  [{self.worker_id}] [Scraper] page replaced after crash")
+        return True
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -292,6 +387,11 @@ class LowesScraper:
                 # the same way (the spam-log bug).
                 raise BrowserClosedError(
                     f"browser closed during navigation: {e}"
+                ) from e
+            if _is_page_crashed_error(e):
+                # Tab crashed — worker recovers cheaply by replacing the page.
+                raise PageCrashedError(
+                    f"page crashed during navigation: {e}"
                 ) from e
             if _is_proxy_error(e):
                 # Proxy-level failure — bump counter, surface as typed error
@@ -320,6 +420,10 @@ class LowesScraper:
             if _is_browser_closed_error(e):
                 raise BrowserClosedError(
                     f"browser closed waiting for body: {e}"
+                ) from e
+            if _is_page_crashed_error(e):
+                raise PageCrashedError(
+                    f"page crashed waiting for body: {e}"
                 ) from e
         await _delay(3, 6)
         return full
@@ -1537,6 +1641,12 @@ class LowesScraper:
                     raise BrowserClosedError(
                         f"browser closed during accordion expand ({label}): {e}"
                     ) from e
+                if _is_page_crashed_error(e):
+                    # Same reasoning as browser-closed: don't keep clicking
+                    # accordions on a dead tab. Worker recreates the page.
+                    raise PageCrashedError(
+                        f"page crashed during accordion expand ({label}): {e}"
+                    ) from e
                 print(f"  [Warn] Accordion {label}: {e}")
         # Also try to expand Product Features
         try:
@@ -1557,6 +1667,10 @@ class LowesScraper:
             if _is_browser_closed_error(e):
                 raise BrowserClosedError(
                     f"browser closed during feature-button scan: {e}"
+                ) from e
+            if _is_page_crashed_error(e):
+                raise PageCrashedError(
+                    f"page crashed during feature-button scan: {e}"
                 ) from e
 
     async def scrape_detail(self, product_url, product_id, force_refresh=False):
