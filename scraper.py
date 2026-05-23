@@ -274,6 +274,19 @@ class LowesScraper:
             except Exception as e:
                 last_err = e
                 msg = f"{type(e).__name__}: {str(e)[:240]}"
+                # Fast-fail: if AdsPower says the profile simply doesn't exist,
+                # retrying 40×15s (~10 min) is pointless — the profile will
+                # never materialise on its own. Abort immediately with a
+                # recognisable error so the caller rebuilds a fresh profile
+                # (swap_to_alive_proxy) instead of looping. This is the
+                # "Profile does not exist" loop the user reported.
+                from adspower_helper import is_profile_missing_msg
+                if is_profile_missing_msg(e):
+                    raise RuntimeError(
+                        f"[{self.worker_id}] AdsPower profile {self.ads.pid} "
+                        f"does not exist — aborting connect, needs profile "
+                        f"recreation. ({msg})"
+                    ) from e
                 if attempt < max_attempts:
                     print(
                         f"[{self.worker_id}] [Connect] attempt {attempt} FAILED: "

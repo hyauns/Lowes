@@ -265,13 +265,20 @@ async def swap_to_alive_proxy(worker: "Worker") -> bool:
         print(f"  [{worker_id}] [recover/swap-proxy] stop failed (continuing): {e}")
     await asyncio.sleep(1.5)
 
-    # 2) Delete burned profile (must succeed — per user mandate)
+    # 2) Delete burned profile. Non-fatal: we are abandoning this profile no
+    #    matter what. delete_profile is idempotent on an already-missing profile
+    #    (returns cleanly), but even a genuine delete error must NOT stop us from
+    #    building a fresh working profile — otherwise a vanished/broken profile
+    #    would strand the worker in a "profile not exists" loop (the exact bug
+    #    the user hit). Press on to create regardless.
     try:
         await asyncio.to_thread(delete_profile, ADSPOWER_API, old_pid)
         print(f"  [{worker_id}] [recover/swap-proxy] deleted {old_pid}")
     except Exception as e:
-        print(f"  [{worker_id}] [recover/swap-proxy] DELETE failed: {e}")
-        return False
+        print(
+            f"  [{worker_id}] [recover/swap-proxy] DELETE failed (continuing to "
+            f"recreate anyway): {e}"
+        )
     await asyncio.sleep(1.5)
 
     # 3) Find alive proxy (with 120s revive wait on first all-dead)
@@ -403,13 +410,17 @@ async def rotate_and_recreate(worker: "Worker") -> bool:
         print(f"  [{worker_id}] [recover/rotate] AdsPower stop failed (continuing): {e}")
     await asyncio.sleep(1.5)
 
-    # 2) Delete the burned profile (per user mandate — must succeed)
+    # 2) Delete the burned profile. Non-fatal (idempotent on missing profile):
+    #    a delete failure must not abort recovery — we still rotate the IP and
+    #    create a fresh profile so the worker recovers instead of looping.
     try:
         await asyncio.to_thread(delete_profile, ADSPOWER_API, old_pid)
         print(f"  [{worker_id}] [recover/rotate] deleted {old_pid}")
     except Exception as e:
-        print(f"  [{worker_id}] [recover/rotate] DELETE failed: {e}")
-        return False
+        print(
+            f"  [{worker_id}] [recover/rotate] DELETE failed (continuing to "
+            f"rotate + recreate anyway): {e}"
+        )
     await asyncio.sleep(1.0)
 
     # 3) Rotate the proxy IP via provider API (cooldown-aware, polls new IP)

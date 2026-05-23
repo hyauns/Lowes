@@ -667,6 +667,31 @@ class Worker:
             print(f"  [{self.worker_id}] [reconnect] back online")
             return True
         except Exception as e:
+            from adspower_helper import is_profile_missing_msg
+
+            # If the profile itself is GONE (deleted by a prior recovery, or a
+            # stale config id), flipping it to local network is impossible —
+            # there's no profile to flip. Go straight to a full rebuild:
+            # delete (no-op) → find an alive proxy from config.PROXIES (or fall
+            # back to local network if none answer) → create a fresh profile →
+            # reconnect. This is exactly what the user asked for: never loop on
+            # "profile not exists", always recreate.
+            if is_profile_missing_msg(e):
+                from recovery import swap_to_alive_proxy
+                print(
+                    f"  [{self.worker_id}] [reconnect] profile {self.profile_id} is "
+                    f"GONE — rebuilding a fresh profile (alive proxy from config "
+                    f"or local network)"
+                )
+                self.status = "recovering"
+                ok = await swap_to_alive_proxy(self)
+                if ok:
+                    self.proxy_dead_recoveries += 1
+                    self.status = "idle"
+                    return True
+                self.proxy_dead_failures += 1
+                return False
+
             print(f"  [{self.worker_id}] [reconnect] failed: {e} — escalating to proxy-dead handler")
             return await self._handle_proxy_dead()
 

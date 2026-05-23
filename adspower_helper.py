@@ -79,6 +79,31 @@ def _check(resp_json: dict, context: str) -> dict:
     return resp_json.get("data", {}) or {}
 
 
+# AdsPower returns one of these (wording varies by version / endpoint) when the
+# target profile is already gone. Recovery treats "missing" as a benign state:
+# the goal of a delete / local-net flip is "this profile is no longer usable",
+# which is already true. Used by delete_profile (idempotent) and by callers that
+# need to route a vanished profile straight to "recreate" instead of looping.
+_PROFILE_MISSING_MARKERS = (
+    "does not exist",
+    "not exist",
+    "none exists",
+    "no exists",
+    "user_id not found",
+    "not found",
+    "no such",
+)
+
+
+def is_profile_missing_msg(msg) -> bool:
+    """True if an AdsPower error/message indicates the profile is already gone.
+
+    Accepts a raw message string or an exception (str()'d). Case-insensitive.
+    """
+    m = (str(msg) if msg is not None else "").lower()
+    return any(marker in m for marker in _PROFILE_MISSING_MARKERS)
+
+
 def list_groups(api_url: str) -> list[dict]:
     j = _request(
         "GET",
@@ -121,9 +146,15 @@ def delete_profile(api_url: str, user_id: str) -> None:
     Akamai, we tear it down completely before creating a fresh one. The
     caller must have stopped the browser first.
 
-    AdsPower v1 takes `user_ids` (list) in JSON body. Raises RuntimeError
-    if the API reports failure — Phase 5.2 needs deletion to definitively
-    succeed before swapping, per explicit user instruction.
+    AdsPower v1 takes `user_ids` (list) in JSON body.
+
+    Idempotent (2026-05-23): if AdsPower reports the profile is already gone
+    ("Profile does not exist" / "none exists" / etc.), we treat that as a
+    successful delete — the end state ("profile no longer exists") is exactly
+    what the caller wanted. This unblocks the recovery ladders: a worker whose
+    profile vanished (deleted by a prior recovery, or a stale config id) must be
+    able to delete-then-recreate instead of getting stuck because delete raised
+    on a profile that was never there. Other (non-missing) failures still raise.
     """
     if not user_id:
         raise ValueError("delete_profile: user_id is required")
@@ -134,7 +165,15 @@ def delete_profile(api_url: str, user_id: str) -> None:
         json=payload,
         timeout=DEFAULT_TIMEOUT,
     )
-    _check(j, f"delete_profile({user_id})")
+    if j.get("code") != 0:
+        msg = j.get("msg") or ""
+        if is_profile_missing_msg(msg):
+            print(
+                f"[AdsPower] delete_profile({user_id}): already gone "
+                f"({msg!r}) — treating as deleted"
+            )
+            return
+        raise RuntimeError(f"AdsPower delete_profile({user_id}) failed: {msg}")
 
 
 def update_proxy(api_url: str, user_id: str, proxy_config: dict) -> None:
